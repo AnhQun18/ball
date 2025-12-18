@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debug Rainbow Sphere</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; color: white; }
+        canvas#three-canvas { display: block; }
+        
+        /* Màn hình debug nhỏ ở góc */
+        #debug-container {
+            position: absolute; bottom: 10px; right: 10px;
+            width: 200px; height: 150px; border: 2px solid #555;
+            background: #222; overflow: hidden; z-index: 100;
+        }
+        #debug-canvas { width: 100%; height: 100%; transform: scaleX(-1); } /* Soi gương video */
+        #input_video { display: none; }
+
+        #info {
+            position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.7);
+            padding: 15px; border-radius: 10px; pointer-events: none;
+        }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .active { background-color: #00ff00; }
+        .waiting { background-color: #ffcc00; }
+    </style>
+</head>
+<body>
+
+    <div id="info">
+        <h2 style="margin:0">Hệ thống Kinetic</h2>
+        <p><span id="dot" class="status-dot waiting"></span> Trạng thái: <span id="status">Khởi động...</span></p>
+        <p style="font-size: 12px; color: #aaa;">Gạt ngang: Xoay Xích đạo | Gạt dọc: Xoay Kinh tuyến</p>
+    </div>
+
+    <div id="debug-container">
+        <canvas id="debug-canvas"></canvas>
+    </div>
+
+    <video id="input_video" playsinline></video>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        const videoElement = document.getElementById('input_video');
+        const debugCanvas = document.getElementById('debug-canvas');
+        const debugCtx = debugCanvas.getContext('2d');
+        const statusText = document.getElementById('status');
+        const statusDot = document.getElementById('dot');
+
+        // --- 1. SETUP THREE.JS ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.domElement.id = "three-canvas";
+        document.body.appendChild(renderer.domElement);
+
+        const particleCount = 800; // Giảm hạt để chạy mượt hơn
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+        const basePos = [];
+
+        for(let i=0; i<particleCount; i++){
+            const phi = Math.acos(-1 + (2 * i) / particleCount);
+            const theta = Math.sqrt(particleCount * Math.PI) * phi;
+            const x = 2.2 * Math.cos(theta) * Math.sin(phi);
+            const y = 2.2 * Math.sin(theta) * Math.sin(phi);
+            const z = 2.2 * Math.cos(phi);
+            positions[i*3]=x; positions[i*3+1]=y; positions[i*3+2]=z;
+            basePos.push(new THREE.Vector3(x, y, z));
+            
+            const color = new THREE.Color();
+            color.setHSL(i/particleCount, 0.8, 0.5);
+            colors[i*3]=color.r; colors[i*3+1]=color.g; colors[i*3+2]=color.b;
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const sphere = new THREE.Points(geometry, new THREE.PointsMaterial({size: 0.08, vertexColors: true, blending: THREE.AdditiveBlending}));
+        scene.add(sphere);
+        camera.position.z = 6;
+
+        // --- 2. SETUP AI HANDS ---
+        let velX = 0, velY = 0, prevHand = {x: 0.5, y: 0.5}, expansion = 1;
+
+        function onResults(results) {
+            // Vẽ lên màn hình debug
+            debugCtx.save();
+            debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+            debugCtx.drawImage(results.image, 0, 0, debugCanvas.width, debugCanvas.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusText.textContent = "Đang nhận diện tay";
+                statusDot.className = "status-dot active";
+
+                const hand = results.multiHandLandmarks[0];
+                
+                // Vẽ bộ xương tay để gỡ lỗi
+                drawConnectors(debugCtx, hand, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+                drawLandmarks(debugCtx, hand, {color: '#FF0000', lineWidth: 2});
+
+                // Logic xoay (Khử gương)
+                const curX = 1 - hand[9].x;
+                const curY = hand[9].y;
+                velX += (curX - prevHand.x) * 0.4;
+                velY += (curY - prevHand.y) * 0.4;
+                prevHand = {x: curX, y: curY};
+
+                // Logic co giãn
+                const d = Math.hypot(hand[8].x - hand[0].x, hand[8].y - hand[0].y);
+                expansion = (d > 0.4) ? 1.4 : (d < 0.2 ? 0.6 : 1.0);
+            } else {
+                statusText.textContent = "Không thấy tay";
+                statusDot.className = "status-dot waiting";
+            }
+            debugCtx.restore();
+        }
+
+        const hands = new Hands({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+        hands.setOptions({maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5});
+        hands.onResults(onResults);
+
+        const cameraAI = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+        cameraAI.start();
+
+        // --- 3. ANIMATION ---
+        let curExp = 1;
+        function animate() {
+            requestAnimationFrame(animate);
+            sphere.rotation.y += velX + 0.001;
+            sphere.rotation.x += velY;
+            velX *= 0.95; velY *= 0.95;
+
+            curExp += (expansion - curExp) * 0.1;
+            const attr = geometry.getAttribute('position');
+            for(let i=0; i<particleCount; i++){
+                attr.setXYZ(i, basePos[i].x * curExp, basePos[i].y * curExp, basePos[i].z * curExp);
+            }
+            attr.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
